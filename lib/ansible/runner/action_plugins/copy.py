@@ -26,6 +26,13 @@ import stat
 import tempfile
 import pipes
 
+## fixes https://github.com/ansible/ansible/issues/3518
+# http://mypy.pythonblogs.com/12_mypy/archive/1253_workaround_for_python_bug_ascii_codec_cant_encode_character_uxa0_in_position_111_ordinal_not_in_range128.html
+import sys
+reload(sys)
+sys.setdefaultencoding("utf8")
+
+
 class ActionModule(object):
 
     def __init__(self, runner):
@@ -119,7 +126,7 @@ class ActionModule(object):
             else:
                 diff = {}
 
-            if self.runner.check:
+            if self.runner.noop_on_check(inject):
                 if content is not None:
                     os.remove(tmp_content)
                 return ReturnData(conn=conn, result=dict(changed=True), diff=diff)
@@ -165,7 +172,7 @@ class ActionModule(object):
                 # don't send down raw=no
                 module_args.pop('raw')
             module_args = "%s src=%s" % (module_args, pipes.quote(tmp_src))
-            if self.runner.check:
+            if self.runner.noop_on_check(inject):
                 module_args = "%s CHECKMODE=True" % module_args
             return self.runner._execute_module(conn, tmp, 'file', module_args, inject=inject, complex_args=complex_args)
 

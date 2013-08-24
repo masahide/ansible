@@ -122,7 +122,7 @@ simply a list of host/IP addresses, like so::
         "5points"     : [ "host7.example.com" ]
     }
 
-.. versionadded: 1.0
+.. versionadded:: 1.0
 
 Before version 1.0, each group could only have a list of hostnames/IP addresses, like the webservers, marietta, and 5points groups above.
 
@@ -135,6 +135,37 @@ if the script does not wish to do this, returning an empty hash/dictionary is th
         "ntpserver"  : "wolf.example.com",
         "monitoring" : "pack.example.com"
     }
+
+Tuning the External Inventory Script
+````````````````````````````````````
+
+.. versionadded:: 1.3
+
+The stock inventory script system detailed above works for all versions of Ansible, but calling
+'--host' for every host can be rather expensive,  especially if it involves expensive API calls to
+a remote subsystemm.  In Ansible 
+1.3 or later, if the inventory script returns a top level element called "_meta", it is possible
+to return all of the host variables in one inventory script call.  When this meta element contains
+a value for "hostvars", the inventory script will not be invoked with "--host" for each host.  This
+results in a significant performance increase for large numbers of hosts, and also makes client
+side caching easier to implement for the inventory script.
+
+The data to be added to the top level JSON dictionary looks like this::
+
+    {
+
+        # results of inventory script as above go here
+        # ...
+
+        "_meta" : {
+           "hostvars" : {
+              "moocow.example.com"     : { "asdf" : 1234 },
+              "llama.example.com"      : { "asdf" : 5678 },
+           }
+        }
+
+    }
+
 
 Example: The Cobbler External Inventory Script
 ``````````````````````````````````````````````
@@ -339,7 +370,7 @@ If you want more Jinja2 filters available in a Jinja2 template (filters like to_
 Distributing Plugins
 --------------------
 
-.. versionadded: 0.8
+.. versionadded:: 0.8
 
 Plugins are loaded from both Python's site_packages (those that ship with ansible) and a configured plugins directory, which defaults
 to /usr/share/ansible/plugins, in a subfolder for each plugin type::

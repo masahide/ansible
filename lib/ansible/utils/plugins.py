@@ -132,7 +132,8 @@ class PluginLoader(object):
         if directory is not None:
             if with_subdir:
                 directory = os.path.join(directory, self.subdir)
-            self._extra_dirs.append(directory)
+            if directory not in self._extra_dirs:
+                self._extra_dirs.append(directory)
 
     def find_plugin(self, name):
         ''' Find a plugin named name '''
@@ -175,7 +176,9 @@ class PluginLoader(object):
         ''' instantiates all plugins with the same arguments '''       
 
         for i in self._get_paths():
-            for path in glob.glob(os.path.join(i, "*.py")):
+            matches = glob.glob(os.path.join(i, "*.py"))
+            matches.sort()
+            for path in matches:
                 name, ext = os.path.splitext(os.path.basename(path))
                 if name.startswith("_"):
                     continue

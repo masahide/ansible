@@ -37,6 +37,7 @@ import ansible.constants as C
 import ansible.inventory
 from ansible import utils
 from ansible.utils import template
+from ansible.utils import check_conditional
 from ansible import errors
 from ansible import module_common
 import poller
@@ -54,6 +55,7 @@ multiprocessing_runner = None
         
 OUTPUT_LOCKFILE  = tempfile.TemporaryFile()
 PROCESS_LOCKFILE = tempfile.TemporaryFile()
+MULTIPROCESSING_MANAGER = multiprocessing.Manager()
 
 ################################################
 
@@ -80,15 +82,13 @@ def _executor_hook(job_queue, result_queue, new_stdin):
         except:
             traceback.print_exc()
 
-class HostVars(dict):
+class HostVars(collections.Mapping):
     ''' A special view of setup_cache that adds values from the inventory when needed. '''
 
     def __init__(self, setup_cache, inventory):
         self.setup_cache = setup_cache
         self.inventory = inventory
         self.lookup = {}
-
-        self.update(setup_cache)
 
     def __getitem__(self, host):
         if not host in self.lookup:
@@ -97,8 +97,12 @@ class HostVars(dict):
             self.lookup[host] = result
         return self.lookup[host]
 
-    def __contains__(self, host):
-        return host in self.lookup or host in self.setup_cache or self.inventory.get_host(host)
+    def __iter__(self):
+        return (host.name for host in self.inventory.get_group('all').hosts)
+
+    def __len__(self):
+        return len(self.inventory.get_group('all').hosts)
+
 
 class Runner(object):
     ''' core API interface to ansible '''
@@ -155,6 +159,7 @@ class Runner(object):
         self.inventory        = utils.default(inventory, lambda: ansible.inventory.Inventory(host_list))
 
         self.module_vars      = utils.default(module_vars, lambda: {})
+        self.always_run       = None
         self.connector        = connection.Connection(self)
         self.conditional      = conditional
         self.module_name      = module_name
@@ -362,7 +367,10 @@ class Runner(object):
             return flags
 
         try:
-            self._new_stdin = new_stdin
+            if not new_stdin:
+                self._new_stdin = os.fdopen(os.dup(sys.stdin.fileno()))
+            else:
+                self._new_stdin = new_stdin
 
             exec_rc = self._executor_internal(host, new_stdin)
             if type(exec_rc) != ReturnData:
@@ -410,6 +418,9 @@ class Runner(object):
         if self.inventory.basedir() is not None:
             inject['inventory_dir'] = self.inventory.basedir()
 
+        if self.inventory.src() is not None:
+            inject['inventory_file'] = self.inventory.src()
+
         # late processing of parameterized sudo_user
         if self.sudo_user is not None:
             self.sudo_user = template.template(self.basedir, self.sudo_user, inject)
@@ -454,6 +465,9 @@ class Runner(object):
             # executing using with_items, so make multiple calls
             # TODO: refactor
 
+            if self.background > 0:
+                raise errors.AnsibleError("lookup plugins (with_*) cannot be used with async tasks")
+
             aggregrate = {}
             all_comm_ok = True
             all_changed = False
@@ -463,8 +477,8 @@ class Runner(object):
                 inject['item'] = x
 
                 # TODO: this idiom should be replaced with an up-conversion to a Jinja2 template evaluation
-                if isinstance(complex_args, basestring):
-                    complex_args = template.template(self.basedir, complex_args, inject, convert_bare=True)
+                if isinstance(self.complex_args, basestring):
+                    complex_args = template.template(self.basedir, self.complex_args, inject, convert_bare=True)
                     complex_args = utils.safe_eval(complex_args)
                     if type(complex_args) != dict:
                         raise errors.AnsibleError("args must be a dictionary, received %s" % complex_args)
@@ -534,6 +548,8 @@ class Runner(object):
                 self.callbacks.on_skipped(host, inject.get('item',None))
                 return ReturnData(host=host, result=result)
 
+        if getattr(handler, 'setup', None) is not None:
+            handler.setup(module_name, inject)
         conn = None
         actual_host = inject.get('ansible_ssh_host', host)
         # allow ansible_ssh_host to be templated
@@ -731,7 +747,10 @@ class Runner(object):
 
         # error handling on this seems a little aggressive?
         if result['rc'] != 0:
-            output = 'could not create temporary directory, SSH (%s) exited with result %d' % (cmd, result['rc'])
+            if result['rc'] == 5:
+                output = 'Authentication failure.'
+            else:
+                output = 'Authentication or permission failure.  In some cases, you may have been able to authenticate and did not have permissions on the remote directory. Consider changing the remote temp path in ansible.cfg to a path rooted in "/tmp". Failed command was: %s, exited with result %d' % (cmd, result['rc'])
             if 'stdout' in result and result['stdout'] != '':
                 output = output + ": %s" % result['stdout']
             raise errors.AnsibleError(output)
@@ -811,7 +830,7 @@ class Runner(object):
     def _parallel_exec(self, hosts):
         ''' handles mulitprocessing when more than 1 fork is required '''
 
-        manager = multiprocessing.Manager()
+        manager = MULTIPROCESSING_MANAGER
         job_queue = manager.Queue()
         for host in hosts:
             job_queue.put(host)
@@ -886,6 +905,9 @@ class Runner(object):
         # host.
         p = utils.plugins.action_loader.get(self.module_name, self)
 
+        if self.forks == 0 or self.forks > len(hosts):
+            self.forks = len(hosts)
+
         if p and getattr(p, 'BYPASS_HOST_LOOP', None):
 
             # Expose the current hostgroup to the bypassing plugins
@@ -923,3 +945,16 @@ class Runner(object):
         self.background = time_limit
         results = self.run()
         return results, poller.AsyncPoller(results, self)
+
+    # *****************************************************
+
+    def noop_on_check(self, inject):
+        ''' Should the runner run in check mode or not ? '''
+
+        # initialize self.always_run on first call
+        if self.always_run is None:
+            self.always_run = self.module_vars.get('always_run', False)
+            self.always_run = check_conditional(
+                self.always_run, self.basedir, inject, fail_on_undefined=True, jinja2=True)
+
+        return (self.check and not self.always_run)
